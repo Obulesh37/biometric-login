@@ -6,22 +6,22 @@ const path = require('path');
 
 const app = express();
 
-// Dynamic config (Render/Vercel/Railway ready)
+// === CONFIG - IMPORTANT FOR DEPLOY ===
 const PORT = process.env.PORT || 3000;
 const ORIGIN = process.env.ORIGIN || `http://localhost:${PORT}`;
 const RP_ID = process.env.RP_ID || 'localhost';
+// ======================================
 
 app.use(cors({ origin: ORIGIN, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
 
-// In-memory storage (data lost on restart — perfect for demo)
-const users = new Map();        // credentialId → user data
+// In-memory storage (lost on restart - perfect for demo)
+const users = new Map();        // credentialId → user
 const challenges = new Map();   // sessionId → temp data
 
 // Helper
 const toBase64Url = (buf) => buf.toString('base64url');
-const fromBase64Url = (str) => Buffer.from(str.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
 
 // Register Request
 app.post('/register/request', (req, res) => {
@@ -40,7 +40,7 @@ app.post('/register/request', (req, res) => {
   res.json({
     sessionId,
     challenge: toBase64Url(challenge),
-    rp: { id: RP_ID, name: "Demo App" },
+    rp: { id: RP_ID, name: "Biometric App" },
     user: {
       id: toBase64Url(Buffer.from(email)),
       name: email,
@@ -61,7 +61,7 @@ app.post('/register/response', (req, res) => {
   try {
     const clientData = JSON.parse(new TextDecoder().decode(credential.response.clientDataJSON));
     if (clientData.challenge !== session.challenge || clientData.origin !== ORIGIN) {
-      throw new Error('Invalid request');
+      throw new Error('Invalid origin or challenge');
     }
 
     const attestation = cbor.decodeFirstSync(credential.response.attestationObject);
@@ -77,11 +77,10 @@ app.post('/register/response', (req, res) => {
       credentialId: credIdB64,
       credentialPublicKey: publicKey,
       counter: 0,
-      registeredAt: new Date()
+      registeredAt: new Date().toISOString()
     });
 
     challenges.delete(sessionId);
-    console.log(`Registered: ${session.name} <${session.email}>`);
     res.json({ success: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -92,7 +91,7 @@ app.post('/register/response', (req, res) => {
 app.post('/login/request', (req, res) => {
   const { email } = req.body;
   const user = [...users.values()].find(u => u.email === email.toLowerCase());
-  if (!user) return res.status(404).json({ error: 'No account' });
+  if (!user) return res.status(404).json({ error: 'No account found' });
 
   const challenge = toBase64Url(crypto.randomBytes(32));
   const sessionId = crypto.randomBytes(16).toString('hex');
@@ -115,7 +114,7 @@ app.post('/login/response', (req, res) => {
   try {
     const clientData = JSON.parse(new TextDecoder().decode(assertion.response.clientDataJSON));
     if (clientData.challenge !== session.challenge || clientData.origin !== ORIGIN) {
-      throw new Error('Invalid');
+      throw new Error('Invalid request');
     }
 
     const user = users.get(assertion.id);
@@ -129,7 +128,9 @@ app.post('/login/response', (req, res) => {
     verify.update(Buffer.concat([authData, clientDataHash]));
     verify.end();
 
-    if (!verify.verify(user.credentialPublicKey, signature)) throw new Error('Bad signature');
+    if (!verify.verify(user.credentialPublicKey, signature)) {
+      throw new Error('Invalid signature');
+    }
 
     const counter = authData.readUInt32BE(33);
     if (counter <= user.counter) throw new Error('Replay attack');
@@ -147,8 +148,7 @@ app.get('/admin/users', (req, res) => {
   const list = [...users.values()].map(u => ({
     name: u.name,
     email: u.email,
-    devices: 1,
-    registeredAt: u.registeredAt.toLocaleString()
+    registeredAt: u.registeredAt
   }));
   res.json({ total: list.length, users: list });
 });
@@ -161,8 +161,8 @@ module.exports = app;
 
 if (!process.env.VERCEL) {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\nFingerprint Login Running!`);
-    console.log(`Open: ${ORIGIN}`);
+    console.log(`\nBiometric Login LIVE!`);
+    console.log(`App: ${ORIGIN}`);
     console.log(`Admin Panel: ${ORIGIN}/admin.html\n`);
   });
 }
