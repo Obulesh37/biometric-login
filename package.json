@@ -1,8 +1,8 @@
 {
-  "name": "biometric-login-simple",
+  "name": "biometric-login",
   "version": "1.0.0",
-  "description": "Fingerprint Login - No MongoDB, Admin Panel Included",
-  "main": "index.js",
+  "description": "Fingerprint/Face ID Login - No Database",
+  "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js"
   },
@@ -10,5 +10,8 @@
     "express": "^4.19.2",
     "cors": "^2.8.5",
     "cbor": "^9.0.2"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
