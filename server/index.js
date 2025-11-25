@@ -1,102 +1,134 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Fingerprint Login</title>
-  <style>
-    body { font-family: system-ui; background: linear-gradient(135deg, #667eea, #764ba2); min-height: 100vh; margin:0; display:flex; align-items:center; justify-content:center; }
-    .card { background:white; padding:40px; border-radius:20px; box-shadow:0 20px 50px rgba(0,0,0,0.3); width:90%; max-width:400px; text-align:center; }
-    input, button { width:100%; padding:14px; margin:10px 0; border-radius:12px; border:1px solid #ddd; font-size:16px; }
-    button { background:#667eea; color:white; border:none; cursor:pointer; }
-    .status { padding:12px; border-radius:12px; margin:15px 0; font-weight:bold; }
-    .success { background:#d4edda; color:#155724; }
-    .error { background:#f8d7da; color:#721c24; }
-    .hidden { display:none; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>Fingerprint Login</h1>
+const express = require('express');
+const cors = require('cors');
+const cbor = require('cbor');
+const crypto = require('crypto');
+const path = require('path');
 
-    <div id="welcome" class="hidden">
-      <h2>Welcome, <span id="name" style="color:#667eea"></span>!</h2>
-      <p id="email"></p>
-      <button onclick="location.reload()">Logout</button>
-    </div>
+const app = express();
+const PORT = process.env.PORT || 3000;
+const ORIGIN = process.env.ORIGIN || `http://localhost:${PORT}`;
+const RP_ID = process.env.RP_ID || 'localhost';
 
-    <div id="register">
-      <input type="text" id="regName" placeholder="Name">
-      <input type="email" id="regEmail" placeholder="Email">
-      <button onclick="register()">Register with Fingerprint</button>
-    </div>
+app.use(cors({ origin: ORIGIN, credentials: true }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.static(path.join(__dirname, '../public')));
 
-    <div id="login" class="hidden">
-      <input type="email" id="loginEmail" placeholder="Email">
-      <button onclick="login()">Login with Fingerprint</button>
-    </div>
+const users = new Map();
+const challenges = new Map();
 
-    <div id="status" class="status success">Ready</div>
-  </div>
+const toBase64Url = buf => buf.toString('base64url');
 
-  <script>
-    const API = '';
-    const status = document.getElementById('status');
+app.post('/register/request', (req, res) => {
+  const { email, name } = req.body;
+  const challenge = crypto.randomBytes(32);
+  const sessionId = crypto.randomBytes(16).toString('hex');
 
-    function setStatus(m, err=false) {
-      status.textContent = m;
-      status.className = err ? 'status error' : 'status success';
-    }
+  challenges.set(sessionId, {
+    challenge: toBase64Url(challenge),
+    email: email.toLowerCase(),
+    name
+  });
 
-    function fromBase64Url(b64) {
-      const padding = '==='.slice(0, (4 - b64.length % 4) % 4);
-      const base64 = (b64 + padding).replace(/-/g, '+').replace(/_/g, '/');
-      return Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-    }
+  res.json({
+    sessionId,
+    challenge: toBase64Url(challenge),
+    rp: { id: RP_ID, name: "Demo App" },
+    user: { id: toBase64Url(Buffer.from(email)), name: email, displayName: name },
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+    authenticatorSelection: { userVerification: "preferred", residentKey: "preferred" },
+    timeout: 60000
+  });
+});
 
-    async function register() {
-      const name = document.getElementById('regName').value.trim();
-      const email = document.getElementById('regEmail').value.trim();
-      if (!name || !email) return setStatus('Fill all', true);
+app.post('/register/response', (req, res) => {
+  const { sessionId, credential } = req.body;
+  const session = challenges.get(sessionId);
+  if (!session) return res.status(400).json({ error: 'Expired' });
 
-      setStatus('Touch sensor...');
-      const res = await fetch(`${API}/register/request`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name,email}) });
-      const opts = await res.json();
+  try {
+    const clientData = JSON.parse(new TextDecoder().decode(credential.response.clientDataJSON));
+    if (clientData.challenge !== session.challenge || clientData.origin !== ORIGIN)
+      throw new Error('Invalid');
 
-      opts.challenge = fromBase64Url(opts.challenge);
-      opts.user.id = fromBase64Url(opts.user.id);
+    const attestation = cbor.decodeFirstSync(credential.response.attestationObject);
+    const authData = attestation.authData;
+    const dataView = new DataView(authData.buffer, authData.byteOffset);
+    const credIdLen = dataView.getUint16(53);
+    const publicKey = cbor.decodeFirstSync(authData.slice(55 + credIdLen));
 
-      const cred = await navigator.credentials.create({ publicKey: opts });
-      await fetch(`${API}/register/response`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({sessionId: opts.sessionId, credential: cred}) });
+    users.set(credential.id, {
+      name: session.name,
+      email: session.email,
+      credentialId: credential.id,
+      credentialPublicKey: publicKey,
+      counter: 0
+    });
 
-      setStatus('Registered! Now login');
-      document.getElementById('login').classList.remove('hidden');
-      document.getElementById('register').classList.add('hidden');
-      document.getElementById('loginEmail').value = email;
-    }
+    challenges.delete(sessionId);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
 
-    async function login() {
-      const email = document.getElementById('loginEmail').value.trim();
-      if (!email) return setStatus('Enter email', true);
+app.post('/login/request', (req, res) => {
+  const { email } = req.body;
+  const user = [...users.values()].find(u => u.email === email.toLowerCase());
+  if (!user) return res.status(404).json({ error: 'Not found' });
 
-      setStatus('Touch sensor...');
-      const res = await fetch(`${API}/login/request`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({email}) });
-      const opts = await res.json();
+  const challenge = toBase64Url(crypto.randomBytes(32));
+  const sessionId = crypto.randomBytes(16).toString('hex');
+  challenges.set(sessionId, { challenge, email: user.email });
 
-      opts.challenge = fromBase64Url(opts.challenge);
-      opts.allowCredentials.forEach(c => c.id = fromBase64Url(c.id));
+  res.json({
+    sessionId,
+    challenge,
+    allowCredentials: [{ type: "public-key", id: user.credentialId }],
+    userVerification: "preferred"
+  });
+});
 
-      const assertion = await navigator.credentials.get({ publicKey: opts });
-      const result = await fetch(`${API}/login/response`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({sessionId: opts.sessionId, assertion}) });
-      const data = await result.json();
+app.post('/login/response', (req, res) => {
+  const { sessionId, assertion } = req.body;
+  const session = challenges.get(sessionId);
+  if (!session) return res.status(400).json({ error: 'Expired' });
 
-      if (data.success) {
-        document.getElementById('name').textContent = data.user.name;
-        document.getElementById('email').textContent = data.user.email;
-        document.getElementById('welcome').classList.remove('hidden');
-        document.getElementById('login').classList.add('hidden');
-        setStatus('Success!');
-      } else setStatus(data.error, true);
-    }
-  </script>
-</body>
-</html>
+  try {
+    const clientData = JSON.parse(new TextDecoder().decode(assertion.response.clientDataJSON));
+    if (clientData.challenge !== session.challenge || clientData.origin !== ORIGIN)
+      throw new Error('Invalid');
+
+    const user = users.get(assertion.id);
+    if (!user) throw new Error('Not found');
+
+    const authData = Buffer.from(assertion.response.authenticatorData);
+    const clientDataHash = crypto.createHash('sha256').update(assertion.response.clientDataJSON).digest();
+    const sig = Buffer.from(assertion.response.signature);
+
+    const verify = crypto.createVerify('SHA256');
+    verify.update(Buffer.concat([authData, clientDataHash]));
+    if (!verify.verify(user.credentialPublicKey, sig))
+      throw new Error('Bad signature');
+
+    const counter = authData.readUInt32BE(33);
+    if (counter <= user.counter) throw new Error('Replay');
+    user.counter = counter;
+
+    challenges.delete(sessionId);
+    res.json({ success: true, user: { name: user.name, email: user.email } });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/admin/users', (req, res) => {
+  res.json({ total: users.size, users: [...users.values()].map(u => ({ name: u.name, email: u.email })) });
+});
+
+app.get('*', (req, res) => res.sendFile(path.join(__dirname, '../public/index.html')));
+
+module.exports = app;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`LIVE → ${ORIGIN}`);
+  console.log(`Admin → ${ORIGIN}/admin.html`);
+});
